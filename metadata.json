@@ -1,0 +1,7 @@
+{
+  "name": "SonicSplit AI",
+  "description": "Next-generation AI audio stem separator with immersive visual design.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
