@@ -1,8 +1,7 @@
 export enum AppState {
   IDLE = 'IDLE',
-  UPLOADING = 'UPLOADING',
   PROCESSING = 'PROCESSING',
-  RESULTS = 'RESULTS'
+  RESULTS = 'RESULTS',
 }
 
 export interface AudioTrack {
@@ -10,12 +9,19 @@ export interface AudioTrack {
   name: string;
   color: string;
   isMuted: boolean;
+  isSolo: boolean;
   volume: number;
-  downloadUrl: string;
+}
+
+export interface AudioInfo {
+  duration: number;
+  sampleRate: number;
+  channels: number;
+  bpm: number;
+  fileSize: number;
 }
 
 export type ProcessingStep = {
-  id: number;
   label: string;
-  completed: boolean;
-}
+  pct: number;
+};
