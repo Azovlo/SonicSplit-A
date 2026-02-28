@@ -1,330 +1,169 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Youtube, Play, Pause, RefreshCw, AudioLines, Download, AlertTriangle } from 'lucide-react';
-import { AppState, AudioTrack } from './types';
+import { Upload, Youtube, Play, Pause, RefreshCw, AudioLines, AlertTriangle, Clock, Music } from 'lucide-react';
+import { AppState, AudioTrack, AudioInfo } from './types';
 import { GlowButton } from './components/ui/GlowButton';
 import { ProcessingView } from './components/ProcessingView';
 import { TrackRow } from './components/TrackRow';
 import { Background } from './components/Background';
+import { AudioEngine, TRACKS } from './utils/audioEngine';
 
-const INITIAL_TRACKS: AudioTrack[] = [
-  { id: 'vocals', name: 'Vocals', color: '#00f3ff', isMuted: false, volume: 100, downloadUrl: '#' },
-  { id: 'drums', name: 'Drums', color: '#bc13fe', isMuted: false, volume: 100, downloadUrl: '#' },
-  { id: 'bass', name: 'Bass', color: '#0aff68', isMuted: false, volume: 100, downloadUrl: '#' },
-  { id: 'other', name: 'Other', color: '#ffbd00', isMuted: false, volume: 100, downloadUrl: '#' },
-];
+// Initial state helpers
+const INITIAL_TRACKS = TRACKS.map(t => ({ ...t, isMuted: false, isSolo: false, volume: 100 }));
 
 function App() {
   const [appState, setAppState] = useState<AppState>(AppState.IDLE);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [fileUrl, setFileUrl] = useState<string | null>(null); // Real file URL
   const [tracks, setTracks] = useState<AudioTrack[]>(INITIAL_TRACKS);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [audioInfo, setAudioInfo] = useState<AudioInfo | null>(null);
+  const [processingStep, setProcessingStep] = useState({ label: '', pct: 0 });
   const [youtubeUrl, setYoutubeUrl] = useState('');
-  const [audioReady, setAudioReady] = useState(false);
 
-  // Web Audio API Refs
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const sourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
-  const audioBufferRef = useRef<AudioBuffer | null>(null);
-  const gainNodesRef = useRef<Record<string, GainNode>>({});
-  const startTimeRef = useRef<number>(0);
-  const pausedAtRef = useRef<number>(0);
+  // Refs
+  const engineRef = useRef<AudioEngine | null>(null);
+  const rafRef = useRef<number>(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Cleanup on unmount
+  // Initialize engine on mount
   useEffect(() => {
-    return () => {
-      if (fileUrl) URL.revokeObjectURL(fileUrl);
-      if (audioContextRef.current) audioContextRef.current.close();
-    };
+    engineRef.current = new AudioEngine();
+    return () => engineRef.current?.dispose();
   }, []);
 
-  // Initialize Audio Engine when entering Processing state
+  // Playback loop
   useEffect(() => {
-    const initAudio = async () => {
-      if (!fileUrl) return;
-
-      try {
-        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-        audioContextRef.current = new AudioContext();
-        
-        // Fetch user audio blob
-        const response = await fetch(fileUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        
-        // Decode logic
-        const decodedAudio = await audioContextRef.current.decodeAudioData(arrayBuffer);
-        audioBufferRef.current = decodedAudio;
-        setAudioReady(true);
-      } catch (error) {
-        console.error("Audio initialization failed:", error);
-        alert("Ошибка при обработке аудиофайла. Попробуйте другой формат (MP3/WAV).");
-        resetApp();
+    const loop = () => {
+      if (engineRef.current && isPlaying) {
+        setCurrentTime(engineRef.current.getCurrentTime());
+        rafRef.current = requestAnimationFrame(loop);
       }
     };
+    if (isPlaying) loop();
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [isPlaying]);
 
-    if (appState === AppState.PROCESSING && fileUrl) {
-        initAudio();
-    }
-  }, [appState, fileUrl]);
-
-  // Handle Playback Logic
-  const togglePlay = async () => {
-    if (!audioContextRef.current || !audioBufferRef.current) return;
-
-    if (audioContextRef.current.state === 'suspended') {
-      await audioContextRef.current.resume();
-    }
-
-    if (isPlaying) {
-      // Pause
-      if (sourceNodeRef.current) {
-        sourceNodeRef.current.stop();
-        sourceNodeRef.current = null;
-        pausedAtRef.current = audioContextRef.current.currentTime - startTimeRef.current;
-      }
-      setIsPlaying(false);
-    } else {
-      // Play
-      const source = audioContextRef.current.createBufferSource();
-      source.buffer = audioBufferRef.current;
-      source.loop = true;
-      sourceNodeRef.current = source;
-
-      const destination = audioContextRef.current.destination;
-
-      // --- REAL-TIME FREQUENCY ISOLATION ENGINE (Client-Side Stems) ---
-      
-      // 1. Vocals (Bandpass - Mids)
-      // Focuses on human voice frequencies (approx 300Hz - 3kHz)
-      const vocalGain = audioContextRef.current.createGain();
-      const vocalFilter = audioContextRef.current.createBiquadFilter();
-      vocalFilter.type = 'peaking';
-      vocalFilter.frequency.value = 1000;
-      vocalFilter.Q.value = 0.5;
-      vocalFilter.gain.value = 0; // Neutral start, let volume control it
-      
-      const vocalHighPass = audioContextRef.current.createBiquadFilter();
-      vocalHighPass.type = 'highpass';
-      vocalHighPass.frequency.value = 300;
-
-      const vocalLowPass = audioContextRef.current.createBiquadFilter();
-      vocalLowPass.type = 'lowpass';
-      vocalLowPass.frequency.value = 4000;
-      
-      // 2. Drums (Highpass + Low Kick)
-      // Focuses on transients and high frequencies
-      const drumsGain = audioContextRef.current.createGain();
-      const drumsFilter = audioContextRef.current.createBiquadFilter();
-      drumsFilter.type = 'highpass';
-      drumsFilter.frequency.value = 3000; // High hats / cymbals
-
-      // 3. Bass (Lowpass)
-      // Focuses on sub-bass and bass lines (< 250Hz)
-      const bassGain = audioContextRef.current.createGain();
-      const bassFilter = audioContextRef.current.createBiquadFilter();
-      bassFilter.type = 'lowpass';
-      bassFilter.frequency.value = 200;
-      bassFilter.Q.value = 1;
-
-      // 4. Other (Mid-scoop)
-      const otherGain = audioContextRef.current.createGain();
-      const otherFilter = audioContextRef.current.createBiquadFilter();
-      otherFilter.type = 'notch'; 
-      otherFilter.frequency.value = 1000;
-
-      // Store gains for volume control
-      gainNodesRef.current = {
-        'vocals': vocalGain,
-        'drums': drumsGain,
-        'bass': bassGain,
-        'other': otherGain
-      };
-
-      // Apply initial volumes
-      tracks.forEach(t => {
-        updateGainNode(t.id, t.isMuted, t.volume);
-      });
-
-      // --- WIRING THE GRAPH ---
-
-      // Vocals: Source -> HighPass -> LowPass -> Gain -> Out
-      source.connect(vocalHighPass);
-      vocalHighPass.connect(vocalLowPass);
-      vocalLowPass.connect(vocalGain);
-      vocalGain.connect(destination);
-
-      // Drums: Source -> HighPass -> Gain -> Out
-      source.connect(drumsFilter);
-      drumsFilter.connect(drumsGain);
-      drumsGain.connect(destination);
-
-      // Bass: Source -> LowPass -> Gain -> Out
-      source.connect(bassFilter);
-      bassFilter.connect(bassGain);
-      bassGain.connect(destination);
-
-      // Other: Source -> Notch -> Gain -> Out
-      source.connect(otherFilter);
-      otherFilter.connect(otherGain);
-      otherGain.connect(destination);
-
-      // Start playback
-      startTimeRef.current = audioContextRef.current.currentTime - pausedAtRef.current;
-      source.start(0, pausedAtRef.current % audioBufferRef.current.duration);
-      setIsPlaying(true);
-    }
-  };
-
-  const updateGainNode = (id: string, isMuted: boolean, volume: number) => {
-    const gainNode = gainNodesRef.current[id];
-    if (gainNode) {
-        // Smooth transition
-        const val = isMuted ? 0 : (volume / 100) * 1.5; // 1.5 multiplier to boost volume slightly after filtering
-        gainNode.gain.setTargetAtTime(val, audioContextRef.current?.currentTime || 0, 0.1);
-    }
-  };
-
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
-      setDragActive(true);
-    } else if (e.type === "dragleave") {
-      setDragActive(false);
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFile(e.dataTransfer.files[0]);
-    }
-  };
-
-  const handleFile = (file: File) => {
-    if (!file.type.startsWith('audio/')) {
-        alert("Пожалуйста, загрузите аудиофайл (MP3, WAV, и т.д.)");
-        return;
-    }
-    // Create a BLOB URL from the actual user file
-    const objectUrl = URL.createObjectURL(file);
-    setFileUrl(objectUrl);
-    setFileName(file.name);
+  const handleFile = async (file: File) => {
+    if (!engineRef.current) return;
     setAppState(AppState.PROCESSING);
-  };
-
-  const handleYoutube = () => {
-    // Since we don't have a backend proxy to bypass CORS and download YouTube streams,
-    // we notify the user. 
-    alert("Для загрузки с YouTube требуется подключение серверного API (Backend). В данной веб-версии доступна работа с локальными файлами.");
-  }
-
-  const handleProcessComplete = () => {
-    setAppState(AppState.RESULTS);
-  };
-
-  const toggleMute = (id: string) => {
-    setTracks(prev => {
-        const newTracks = prev.map(t => t.id === id ? { ...t, isMuted: !t.isMuted } : t);
-        const track = newTracks.find(t => t.id === id);
-        if(track) updateGainNode(id, track.isMuted, track.volume);
-        return newTracks;
-    });
-  };
-
-  const changeVolume = (id: string, val: number) => {
-    setTracks(prev => {
-        const newTracks = prev.map(t => t.id === id ? { ...t, volume: val } : t);
-        updateGainNode(id, newTracks.find(t => t.id === id)?.isMuted || false, val);
-        return newTracks;
-    });
+    
+    try {
+      const info = await engineRef.current.loadFile(file, (step, pct) => {
+        setProcessingStep({ label: step, pct });
+      });
+      setAudioInfo(info);
+      setAppState(AppState.RESULTS);
+    } catch (e) {
+      console.error(e);
+      alert('Ошибка при обработке файла. Проверьте формат.');
+      setAppState(AppState.IDLE);
+    }
   };
 
   const resetApp = () => {
-    if (sourceNodeRef.current) sourceNodeRef.current.stop();
-    if (fileUrl) URL.revokeObjectURL(fileUrl);
-    
-    setIsPlaying(false);
+    engineRef.current?.stop();
     setAppState(AppState.IDLE);
-    setFileName(null);
-    setFileUrl(null);
+    setIsPlaying(false);
+    setCurrentTime(0);
     setTracks(INITIAL_TRACKS);
-    setYoutubeUrl('');
-    setAudioReady(false);
-    pausedAtRef.current = 0;
+    setAudioInfo(null);
+  };
+
+  const togglePlay = () => {
+    if (!engineRef.current) return;
+    if (isPlaying) {
+      engineRef.current.pause();
+    } else {
+      engineRef.current.play(() => setIsPlaying(false));
+    }
+    setIsPlaying(!isPlaying);
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const time = parseFloat(e.target.value);
+    setCurrentTime(time);
+    engineRef.current?.seekTo(time);
+  };
+
+  const toggleMute = (id: string) => {
+    setTracks(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        const newMuted = !t.isMuted;
+        engineRef.current?.setMuted(id, newMuted);
+        return { ...t, isMuted: newMuted };
+    }));
+  };
+
+  const toggleSolo = (id: string) => {
+    setTracks(prev => {
+        const isSoloing = !prev.find(t => t.id === id)?.isSolo;
+        engineRef.current?.setSolo(isSoloing ? id : null);
+        return prev.map(t => ({
+            ...t,
+            isSolo: t.id === id ? isSoloing : false,
+            // If we are soloing this track, visually mute others (logic handled in engine, this is just for UI state if needed)
+        }));
+    });
+  };
+
+  const changeVolume = (id: string, vol: number) => {
+    setTracks(prev => prev.map(t => t.id === id ? { ...t, volume: vol } : t));
+    engineRef.current?.setVolume(id, vol);
+  };
+
+  const handleExport = (id: string, name: string) => {
+      engineRef.current?.exportTrack(id, name);
+  };
+
+  const formatTime = (t: number) => {
+      const m = Math.floor(t / 60);
+      const s = Math.floor(t % 60);
+      return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
   return (
-    <div className="min-h-screen w-full bg-dark-900 text-white selection:bg-neon-blue selection:text-black font-sans relative overflow-hidden">
-      
-      {/* Live Liquid/Vibration Background */}
-      <Background isPlaying={isPlaying} />
-      
-      {/* Vignette Overlay for Depth */}
-      <div className="fixed inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,#050505_100%)] pointer-events-none z-0" />
+    <div className="relative w-full min-h-screen bg-dark-900 text-white overflow-x-hidden">
+      <Background />
 
-      {/* Navigation */}
-      <nav className="relative z-50 w-full px-8 py-6 flex justify-between items-center backdrop-blur-sm border-b border-white/5">
-        <div className="flex items-center gap-3 group cursor-pointer" onClick={resetApp}>
-          <div className="w-10 h-10 bg-gradient-to-br from-neon-blue to-neon-purple rounded-xl flex items-center justify-center shadow-lg group-hover:shadow-neon-blue/50 transition-all duration-300">
-            <AudioLines className="text-white" />
+      <nav className="absolute top-0 left-0 w-full p-6 z-50 flex justify-between items-center">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-gradient-to-tr from-neon-blue to-neon-purple rounded-lg flex items-center justify-center">
+            <AudioLines size={18} className="text-white" />
           </div>
-          <span className="text-2xl font-display font-bold tracking-tighter">
-            SONIC<span className="text-neon-blue">SPLIT</span>
-          </span>
+          <span className="font-display font-bold text-xl tracking-wider">SonicSplit<span className="text-neon-blue">AI</span></span>
         </div>
-        <div className="hidden md:flex gap-6 text-sm font-medium text-gray-400">
-            <a href="#" className="hover:text-white transition-colors">Технология</a>
-            <a href="#" className="hover:text-white transition-colors">О нас</a>
-            <a href="#" className="hover:text-white transition-colors">GitHub</a>
-        </div>
+        <a href="https://github.com/Azovlo/SonicSplit-A" target="_blank" className="text-sm text-gray-500 hover:text-white transition-colors">v2.0.0 (WebAudio)</a>
       </nav>
 
-      <main className="relative z-10 container mx-auto px-4 py-12 flex flex-col items-center min-h-[80vh]">
+      <main className="relative z-10 container mx-auto px-4 pt-32 pb-20 flex flex-col items-center min-h-screen">
         
-        <AnimatePresence mode='wait'>
-          {/* IDLE STATE - HERO & UPLOAD */}
+        <AnimatePresence mode="wait">
           {appState === AppState.IDLE && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="w-full max-w-4xl flex flex-col items-center text-center"
+              exit={{ opacity: 0, y: -20 }}
+              className="w-full max-w-4xl text-center"
               key="idle"
             >
-              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs font-mono uppercase tracking-widest text-neon-blue mb-8 backdrop-blur-md">
-                <span className="w-2 h-2 rounded-full bg-neon-blue animate-pulse"></span>
-                Web Audio Engine Ready
-              </div>
-              
-              <h1 className="text-5xl md:text-7xl font-display font-black leading-tight mb-6 drop-shadow-2xl">
+              <h1 className="text-5xl md:text-7xl font-display font-bold mb-6 bg-clip-text text-transparent bg-gradient-to-b from-white to-gray-600">
                 Раздели музыку <br/>
-                <span className="text-transparent bg-clip-text bg-gradient-to-r from-neon-blue via-white to-neon-purple">
-                  На атомы
-                </span>
+                <span className="bg-gradient-to-r from-neon-blue via-neon-purple to-neon-green bg-clip-text text-transparent">на стемы</span>
               </h1>
-              
-              <p className="text-xl text-gray-300 max-w-2xl mb-16 font-light drop-shadow-lg">
-                Загрузите любой аудиофайл и управляйте дорожками в реальном времени. Вокал, бас и ударные под полным контролем.
+              <p className="text-lg text-gray-400 mb-12 max-w-2xl mx-auto">
+                Загрузи трек и получи отдельные дорожки (Vocals, Drums, Bass, Other) прямо в браузере.
+                Без серверов. Без ожидания. Бесплатно.
               </p>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl mx-auto">
                 {/* Upload Zone */}
                 <div 
-                  className={`relative group h-64 border-2 border-dashed rounded-3xl flex flex-col items-center justify-center transition-all duration-300 backdrop-blur-sm cursor-pointer ${dragActive ? 'border-neon-blue bg-neon-blue/10 scale-[1.02]' : 'border-white/20 bg-dark-800/40 hover:border-neon-blue/50 hover:bg-dark-800/60'}`}
-                  onDragEnter={handleDrag}
-                  onDragLeave={handleDrag}
-                  onDragOver={handleDrag}
-                  onDrop={handleDrop}
-                  onClick={() => document.getElementById('file-upload')?.click()}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="h-64 border border-white/10 bg-dark-800/40 backdrop-blur-sm rounded-3xl p-8 flex flex-col items-center justify-center cursor-pointer hover:bg-white/5 hover:border-neon-blue/50 transition-all group"
                 >
                   <input 
+                    ref={fileInputRef}
                     type="file" 
-                    id="file-upload" 
                     className="hidden"
                     onChange={(e) => e.target.files && handleFile(e.target.files[0])}
                     accept="audio/*"
@@ -337,104 +176,115 @@ function App() {
                 </div>
 
                 {/* YouTube Zone */}
-                <div className="h-64 border border-white/10 bg-dark-800/40 backdrop-blur-sm rounded-3xl p-8 flex flex-col items-center justify-center relative overflow-hidden group hover:border-neon-purple/50 transition-colors">
-                  <div className="absolute top-0 right-0 w-32 h-32 bg-neon-purple/20 blur-[50px] rounded-full translate-x-10 -translate-y-10 group-hover:bg-neon-purple/30 transition-all" />
-                  
+                <div className="h-64 border border-white/10 bg-dark-800/40 backdrop-blur-sm rounded-3xl p-8 flex flex-col items-center justify-center relative overflow-hidden group">
+                   <div className="absolute inset-0 bg-black/60 z-20 flex flex-col items-center justify-center p-6 text-center opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm">
+                        <AlertTriangle className="text-yellow-500 mb-2" size={24} />
+                        <p className="text-sm text-white font-medium">YouTube недоступен в Web-версии</p>
+                        <p className="text-xs text-gray-400 mt-1">CORS ограничения браузера не позволяют скачивать видео напрямую. Загрузите MP3 файл.</p>
+                   </div>
+
                   <div className="w-16 h-16 rounded-full bg-red-600/20 flex items-center justify-center mb-4 shadow-2xl border border-red-500/20">
                     <Youtube className="text-red-500" size={28} />
                   </div>
                   <h3 className="text-lg font-bold font-display mb-4 text-white">YouTube Ссылка</h3>
-                  <div className="flex w-full gap-2 relative z-10">
-                    <input 
-                      type="text" 
-                      placeholder="Вставьте ссылку..." 
-                      className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 text-sm text-white focus:outline-none focus:border-neon-purple transition-colors placeholder:text-gray-600"
-                      value={youtubeUrl}
-                      onChange={(e) => setYoutubeUrl(e.target.value)}
-                    />
-                    <button 
-                        onClick={handleYoutube}
-                        disabled={!youtubeUrl}
-                        className="bg-white text-black p-3 rounded-xl hover:bg-neon-purple hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <Play size={18} fill="currentColor" />
-                    </button>
+                  <div className="flex w-full gap-2 relative z-10 opacity-50">
+                    <input type="text" placeholder="Ссылка..." className="flex-1 bg-black/40 border border-white/10 rounded-xl px-4 text-sm text-white" disabled />
+                    <button className="bg-white/10 text-white p-3 rounded-xl" disabled><Play size={18} /></button>
                   </div>
                 </div>
               </div>
             </motion.div>
           )}
 
-          {/* PROCESSING STATE */}
           {appState === AppState.PROCESSING && (
-            <ProcessingView key="processing" onComplete={handleProcessComplete} />
+            <ProcessingView key="processing" step={processingStep.label} pct={processingStep.pct} />
           )}
 
-          {/* RESULTS STATE */}
-          {appState === AppState.RESULTS && (
+          {appState === AppState.RESULTS && audioInfo && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="w-full max-w-5xl"
               key="results"
             >
-              <header className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
-                <div>
-                  <h2 className="text-3xl font-display font-bold text-white mb-1">Аудио готово</h2>
-                  <div className="flex flex-col gap-1">
-                      <p className="text-gray-400 flex items-center gap-2">
+              {/* Header Info */}
+              <header className="flex flex-col md:flex-row md:items-end justify-between mb-8 gap-6 bg-white/5 p-6 rounded-3xl border border-white/5">
+                <div className="flex-1">
+                  <div className="flex items-center gap-4 mb-2">
+                     <div className="p-2 bg-neon-blue/20 rounded-lg text-neon-blue">
+                        <Music size={24} />
+                     </div>
+                     <div>
+                        <h2 className="text-2xl font-display font-bold text-white">Project STEMS</h2>
+                        <p className="text-xs text-neon-blue font-mono">AI PROCESSED • {audioInfo.sampleRate}Hz • {audioInfo.channels}CH</p>
+                     </div>
+                  </div>
+                  <div className="flex gap-6 mt-4 text-sm text-gray-400">
+                      <div className="flex items-center gap-2">
+                        <Clock size={16} className="text-neon-purple" />
+                        <span>{formatTime(audioInfo.duration)}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
                         <AudioLines size={16} className="text-neon-green" />
-                        Источник: <span className="text-white font-medium">{fileName || 'Uploaded Audio'}</span>
-                      </p>
+                        <span>{audioInfo.bpm} BPM</span>
+                      </div>
                   </div>
                 </div>
-                <div className="flex gap-3">
-                    <GlowButton variant="secondary" onClick={resetApp} icon={<RefreshCw size={18} />}>
-                        Новый трек
-                    </GlowButton>
-                    <GlowButton 
-                        onClick={togglePlay}
-                        disabled={!audioReady}
-                        icon={isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
-                    >
-                        {isPlaying ? 'Пауза' : 'Слушать'}
-                    </GlowButton>
+
+                <div className="flex flex-col items-end gap-3 w-full md:w-auto">
+                    <div className="flex items-center gap-2 w-full md:w-64 bg-black/40 p-2 rounded-xl border border-white/10">
+                        <span className="text-xs font-mono text-neon-blue w-10 text-right">{formatTime(currentTime)}</span>
+                        <input 
+                            type="range" 
+                            min="0" 
+                            max={audioInfo.duration} 
+                            step="0.1"
+                            value={currentTime}
+                            onChange={handleSeek}
+                            className="flex-1 h-1 bg-white/10 rounded-full appearance-none cursor-pointer accent-neon-blue"
+                        />
+                        <span className="text-xs font-mono text-gray-500 w-10">{formatTime(audioInfo.duration)}</span>
+                    </div>
+
+                    <div className="flex gap-3 w-full md:w-auto">
+                        <GlowButton variant="secondary" onClick={resetApp} icon={<RefreshCw size={18} />}>
+                            Заново
+                        </GlowButton>
+                        <GlowButton 
+                            onClick={togglePlay}
+                            icon={isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+                        >
+                            {isPlaying ? 'Пауза' : 'Слушать'}
+                        </GlowButton>
+                    </div>
                 </div>
               </header>
 
+              {/* Tracks */}
               <div className="space-y-4">
                 {tracks.map(track => (
                   <TrackRow 
                     key={track.id} 
                     track={track} 
+                    analyser={engineRef.current?.getAnalyser(track.id) ?? null}
                     onToggleMute={toggleMute}
+                    onToggleSolo={toggleSolo}
                     onVolumeChange={changeVolume}
+                    onExport={handleExport}
                     isPlaying={isPlaying}
                   />
                 ))}
               </div>
 
-              <div className="mt-12 p-6 rounded-2xl bg-dark-800/40 backdrop-blur-md border border-white/10 flex flex-col md:flex-row items-center justify-between gap-4">
-                 <div className="flex items-start gap-4">
-                    <div className="p-3 bg-yellow-500/10 rounded-lg text-yellow-500">
-                        <AlertTriangle size={24} />
-                    </div>
-                    <div>
-                        <h3 className="text-lg font-bold text-white">Экспорт дорожек</h3>
-                        <p className="text-sm text-gray-400 max-w-lg">
-                           Для сохранения отдельных дорожек (Vocals.wav, Bass.wav) требуется серверная обработка. 
-                           В текущей Web-версии вы можете скачать оригинал или использовать микшер в реальном времени.
-                        </p>
-                    </div>
-                </div>
-                <GlowButton variant="outline" onClick={() => alert("Функция экспорта доступна в PRO версии с backend-поддержкой.")} icon={<Download size={18} />}>
-                    Скачать Микс
-                </GlowButton>
+              <div className="mt-8 text-center">
+                 <p className="text-xs text-gray-500 font-mono">
+                    * Разделение выполнено в реальном времени через WebAudio API BiquadFilters. 
+                    Качество зависит от сложности микса.
+                 </p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
-
       </main>
     </div>
   );
