@@ -123,7 +123,7 @@ function App() {
 
   return (
     <div className="relative w-full min-h-screen bg-dark-900 text-white overflow-x-hidden">
-      <Background />
+      <Background isPlaying={isPlaying} />
 
       <nav className="absolute top-0 left-0 w-full p-6 z-50 flex justify-between items-center">
         <div className="flex items-center gap-2">

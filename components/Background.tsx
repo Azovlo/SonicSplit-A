@@ -1,10 +1,10 @@
 import React, { useEffect, useRef } from 'react';
 
 interface BackgroundProps {
-  isPlaying: boolean;
+  isPlaying?: boolean;
 }
 
-export const Background: React.FC<BackgroundProps> = ({ isPlaying }) => {
+export const Background: React.FC<BackgroundProps> = ({ isPlaying = false }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
